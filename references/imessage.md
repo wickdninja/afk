@@ -176,7 +176,7 @@ After the first post of a new session, fetch it back once to confirm it rendered
 ### sqlite3 / chat.db
 - Reading chat.db requires **Full Disk Access** for whatever process runs `sqlite3`. Without it: `Error: unable to open database file`. Fix: System Settings → Privacy & Security → Full Disk Access → [your terminal]. Surface and exit if this fails.
 - chat.db is written-to live by Messages.app. The read script uses a read-only connection (`file:…?mode=ro`) to avoid lock contention. Transient `database is locked` is possible under heavy write; retry once after 500ms before giving up.
-- Newer macOS versions may store message bodies in `attributedBody` (binary NSKeyedArchiver) instead of `text`. The read script returns only messages with non-null `text`. Messages with rich formatting, tapbacks, reactions, and some stickers may be invisible to this path. Document this as a known gap; tell users to reply with plain text.
+- Newer macOS versions may store message bodies in `attributedBody` (binary NSAttributedString typedstream) instead of `text`. The Python read script (`imessage_read.py`, also exposed as `imessage_read.sh`) decodes the NSString payload from `attributedBody` when `text` is NULL — both regular replies and most rich replies round-trip. Tapbacks, reactions, and some stickers (which embed via NSDictionary attributes rather than a length-prefixed NSString backing) are still invisible; tell users to reply with plain text or short emoji.
 
 ### Graceful degradation
 

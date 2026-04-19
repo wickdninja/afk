@@ -38,7 +38,7 @@ fi
 # newlines, quotes, and backslashes survive correctly. json.dumps happens to
 # produce a valid AppleScript string: "…" with \n, \", \\ escapes, all of which
 # AppleScript accepts.
-BODY_LITERAL=$(python3 -c 'import sys,json; sys.stdout.write(json.dumps(sys.stdin.read()))' < "$BODY_FILE")
+BODY_LITERAL=$(python3 -c 'import sys,json; sys.stdout.write(json.dumps(sys.stdin.read(), ensure_ascii=False))' < "$BODY_FILE")
 
 # Build the AppleScript. Using -e per line keeps things readable and avoids
 # heredoc-vs-shell-quoting confusion.
