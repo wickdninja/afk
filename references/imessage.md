@@ -78,17 +78,16 @@ To convert to Unix epoch for display: `unix_seconds = date / 1_000_000_000 + 978
 
 ## Sender distinguishability
 
-Unlike Slack, iMessage **does** tell you who sent each message (`is_from_me`):
+iMessage gives you `is_from_me` per message, but **the sentinel is the load-bearing filter**, not `is_from_me`. Reason: when the user has the same Apple ID signed in on both their Mac (where you're running) and their phone (where they're replying), iMessage marks BOTH sides as `is_from_me = 1` in `chat.db`. Filtering on it alone will silently drop every user reply.
 
-- `is_from_me = 1` → sent from this Mac (i.e., you, Claude, via osascript).
-- `is_from_me = 0` → incoming from the remote handle (the user on their phone).
+Apply filters in this order:
 
-This is more reliable than the sentinel. Use BOTH as defense in depth:
+1. **Sentinel first.** Skip any message whose text (after trimming leading whitespace) starts with the sentinel (`🤖 `). This is your authoritative "I sent this" check.
+2. **`is_from_me = 0` as a sanity check** when the user is on a *different* Apple ID. If you observe at least one `is_from_me = 0` message in the conversation history, it's safe to use `is_from_me = 0` as a secondary filter. If every message in history is `is_from_me = 1`, you're in the same-Apple-ID case — the secondary filter is useless and the sentinel is the ONLY filter.
 
-1. Filter messages with `is_from_me = 1` → skip.
-2. Also filter remaining messages whose text starts with the sentinel (`🤖 `) → skip. This catches the weird case where you somehow posted as the other side (e.g., if the user tests by echoing your message back on their phone), and stays consistent with the rest of the protocol.
+Detect the same-Apple-ID case once on session start: read the last ~20 messages, count `is_from_me` values. If all are 1, write `"same_apple_id": true` to session.json `notes` so future ticks skip the secondary filter.
 
-Everything that survives both filters is real user input.
+Everything that survives the sentinel filter (and the `is_from_me = 0` filter, when applicable) is real user input.
 
 ## Sentinel
 
@@ -209,7 +208,9 @@ On session start, BEFORE posting the header, run these two checks and surface an
    ```
    Exit 0 with output = Automation is granted. Non-zero (especially `-1743` "Not authorized") = print the Automation fix instructions and exit.
 
-Both are one-shot; cache the success for the session's lifetime.
+3. **Same-Apple-ID detection** (after sending the header so there's at least one row to inspect): read the last 20 messages from this conversation, count `is_from_me` values. If every row is `is_from_me = 1`, both ends share an Apple ID — write `"same_apple_id": true` (or a notes string) to `session.json` so subsequent ticks skip the `is_from_me` secondary filter. See "Sender distinguishability" above for why this matters.
+
+The first two are one-shot; cache the success for the session's lifetime. The third should re-check on resume since the user could have signed out/in between sessions.
 
 ## Testing (one-time per machine)
 
