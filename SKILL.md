@@ -136,14 +136,25 @@ While making progress:
 When you need input:
 
 1. Post the question. Update `last_seen_ts` in the state file to the ts of your question (so your own post is not mistaken for a reply).
-2. Call `ScheduleWakeup` with the `prompt` being a short self-briefing like: `Resume AFK session — read thread for replies since last_seen_ts and act on them. Cwd: <pwd>.` Pass `<<autonomous-loop-dynamic>>` ONLY if this session was launched autonomously with no user prompt; otherwise use the self-briefing string.
-3. Delay choice (cache-aware — see `ScheduleWakeup` docs):
-   - Actively expecting a reply in the next few minutes: **60–270s**.
-   - Idle standby (user is at dinner, no rush): **1200–1800s**.
-   - Never pick 300s — worst of both cache windows.
-4. On wake: read the thread with `oldest = last_seen_ts`. Strip messages whose text starts with the sentinel (those are yours). Anything remaining is user input.
-5. **No new input** → update `last_seen_ts` to `now` is NOT correct (you'd miss past messages); keep `last_seen_ts` unchanged and `ScheduleWakeup` again. If this is the Nth consecutive empty wake, increase the delay (backoff): 90s → 270s → 900s → 1800s.
-6. **New input** → set `last_seen_ts` to the ts of the newest user message consumed, then act. Parse for commands first, then treat the rest as instruction.
+2. Call `ScheduleWakeup`:
+   - `prompt`: pass the **verbatim original `/loop /afk …` invocation string** (e.g., `/loop /afk --transport=imessage <task>`). The `/loop` harness re-enters this skill on that prompt. Pass `<<autonomous-loop-dynamic>>` ONLY if the session was launched autonomously with no user prompt. **Do not** pass a self-briefing string — `/loop` won't re-enter the skill.
+   - `delaySeconds`: cache-aware — see `ScheduleWakeup` docs.
+     - Actively expecting a reply in the next few minutes: **60–270s**.
+     - Idle standby (user is at dinner, no rush): **1200–1800s**.
+     - Never pick 300s — worst of both cache windows.
+3. On wake: read the thread with `oldest = last_seen_ts`. Apply the filter chain from `references/<transport>.md` (sentinel first; sender metadata only as a secondary check, and only when reliable on this transport). Anything that survives is user input.
+4. **No new input** → keep `last_seen_ts` unchanged (updating to "now" would silently drop past messages). Increment `empty_wake_streak`. Apply backoff (90s → 270s → 900s → 1800s).
+5. **New input** → set `last_seen_ts` to the ts of the newest user message consumed, reset `empty_wake_streak` to 0, then act. Parse for commands first, then treat the rest as instruction.
+
+### The no-silent-tick rule
+
+A tick is *silent* if you woke up, did no user-visible work, and went back to sleep. Three or more silent ticks in a row makes the session look dead from the user's phone — they'll assume polling broke and stop trusting the protocol.
+
+Defense:
+
+- **A wait window is a budget for parallel work, not a sleep loop.** While you're waiting on a question, pick a concrete piece of the goal you can advance independently and ship it. Post the result on the next tick.
+- **Heartbeat after 2 empty ticks at long delays.** If you've been at 900s+ delay for 2+ wakes with no user reply AND no progress to report, post one short heartbeat (`🤖 ▸ still here, waiting on <X>`) so the user knows the session is alive. Do this at most once per backoff plateau, not every tick.
+- **Don't apologise for backoff.** If the user replies after a long delay, just answer — never lead with "sorry I was slow". They authored the wait by going AFK; treating it as a problem trains them to expect anxious behavior.
 
 ### 4. Close
 

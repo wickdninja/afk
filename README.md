@@ -14,7 +14,9 @@ You tell Claude where you're going (`/loop /afk ship the routing fix`), Claude p
 
 ![iMessage AFK session](docs/imessage-session.png)
 
-In both cases your sends and Claude's sends appear under the same account, so the skill uses a `🤖 ` sentinel prefix (and on iMessage, `is_from_me`) to tell them apart. No polling your own posts into an infinite loop.
+In both cases your sends and Claude's sends appear under the same account, so the skill uses a `🤖 ` sentinel prefix to tell them apart. No polling your own posts into an infinite loop.
+
+> **iMessage gotcha**: if your Mac and iPhone are signed into the same Apple ID, every message in `chat.db` is marked `is_from_me=1` — including yours. The sentinel is the only reliable filter; the skill detects this case at session start and pins to sentinel-only filtering.
 
 ## Quick install (user-scoped)
 
