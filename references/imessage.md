@@ -24,12 +24,14 @@ Read the iMessage handle + service from `~/.claude/afk/imessage.json`:
 ```json
 {
   "handle": "+15551234567",
-  "service": "iMessage"
+  "service": "iMessage",
+  "aliases": ["+15551234567", "you@example.com"]
 }
 ```
 
-- `handle` — phone number (E.164: `+15551234567`) or email address registered with iMessage. For SMS-only recipients use `service: "SMS"` and a phone number.
+- `handle` — phone number (E.164: `+15551234567`) or email address registered with iMessage. This is the address you SEND to. For SMS-only recipients use `service: "SMS"` and a phone number.
 - `service` — `"iMessage"` (default) or `"SMS"`. Pick SMS only if the recipient isn't on iMessage and you're OK paying per-message + losing delivery receipts.
+- `aliases` — **optional but strongly recommended.** Every address the same person might reply FROM. One Apple ID commonly registers both a phone number and one or more emails; iMessage records a reply under whichever alias the phone was using, which is not always the one you sent to. **Read polls all of them** (pass them comma-joined; see "Read"). If omitted, only `handle` is polled and a reply from a non-pinned alias is silently dropped. Include `handle` itself in the list. Observed live: a user reply landed under the email alias while the reader polled only the phone number, and the session went deaf.
 
 If the config file is missing, stop and tell the user in the terminal:
 
@@ -59,11 +61,13 @@ Exit code 0 on success. Any non-zero exit = send failed; read stderr and surface
 ### Read
 
 ```
-~/.claude/skills/afk/scripts/imessage_read.sh <handle> [since_ns]
+~/.claude/skills/afk/scripts/imessage_read.sh <handle>[,<alias2>,...] [since_ns]
 ```
 
-- `handle` — same handle used to send.
+- `handle` — one or more comma-separated addresses. **Always pass every entry from `aliases`** (comma-joined, no spaces), not just the pinned send handle. Polling a single handle drops replies the user sent from a different alias.
 - `since_ns` — cursor, matching `message.date` format (nanoseconds since Apple epoch 2001-01-01 UTC). Default `0` returns all messages in that conversation (use only on cold-start; normally pass `last_seen_ts`).
+
+The reader populates `text` from `message.text` when present and otherwise decodes `message.attributedBody` (the NSAttributedString typedstream where the body now lives on current macOS). It does this for BOTH inbound and outbound rows, and it does **not** filter by `is_from_me` — that is the consumer's job via the sentinel (see "Sender distinguishability"). Attachment placeholder characters (object-replacement, `U+FFFC`) are stripped; a message that is nothing but an attachment/tapback is omitted (no phantom empty row).
 
 Outputs **one JSON object per line** (JSONL), oldest-first:
 
@@ -78,16 +82,22 @@ To convert to Unix epoch for display: `unix_seconds = date / 1_000_000_000 + 978
 
 ## Sender distinguishability
 
-iMessage gives you `is_from_me` per message, but **the sentinel is the load-bearing filter**, not `is_from_me`. Reason: when the user has the same Apple ID signed in on both their Mac (where you're running) and their phone (where they're replying), iMessage marks BOTH sides as `is_from_me = 1` in `chat.db`. Filtering on it alone will silently drop every user reply.
+**The sentinel is the sole required filter. Never drop a message because of `is_from_me`.**
 
-Apply filters in this order:
+Reason: when the user has the same Apple ID signed in on both their Mac (where you're running) and their phone (where they're replying), iMessage marks BOTH sides as `is_from_me = 1` in `chat.db`. An `is_from_me = 0` filter then matches zero rows and every user reply is silently dropped. This exact bug made an AFK session go deaf. The read helper deliberately emits every row and does NOT filter on `is_from_me`; the consumer must not re-introduce that filter.
 
-1. **Sentinel first.** Skip any message whose text (after trimming leading whitespace) starts with the sentinel (`🤖 `). This is your authoritative "I sent this" check.
-2. **`is_from_me = 0` as a sanity check** when the user is on a *different* Apple ID. If you observe at least one `is_from_me = 0` message in the conversation history, it's safe to use `is_from_me = 0` as a secondary filter. If every message in history is `is_from_me = 1`, you're in the same-Apple-ID case — the secondary filter is useless and the sentinel is the ONLY filter.
+The filter, in full:
 
-Detect the same-Apple-ID case once on session start: read the last ~20 messages, count `is_from_me` values. If all are 1, write `"same_apple_id": true` to session.json `notes` so future ticks skip the secondary filter.
+- **Sentinel only.** A message is YOURS if and only if its `text` (after trimming leading whitespace) starts with the sentinel (`🤖 `). Skip those. **Everything else is user input** — regardless of `is_from_me`, regardless of which alias it came from.
 
-Everything that survives the sentinel filter (and the `is_from_me = 0` filter, when applicable) is real user input.
+`is_from_me` is informational (it's in the JSONL for logging/debugging), not a gate. Do not condition on it, and do not maintain a "same_apple_id" flag to decide whether to trust it — the sentinel makes that decision unnecessary in every topology:
+
+- **Same Apple ID** (all rows `is_from_me = 1`): the sentinel is the only thing that can tell your posts from the user's. Correct by construction.
+- **Different Apple ID** (user replies are `is_from_me = 0`): the sentinel still cleanly excludes your posts; the `is_from_me = 0` rows also happen to be user input, so the outcome is identical. There is no case where adding an `is_from_me` gate helps, and one common case where it silently breaks — so don't add it.
+
+Corollary: if you ever see a recent inbound-looking message that lacks the sentinel, treat it as user input immediately. Do not wait to "confirm" the Apple-ID topology first.
+
+Everything that survives the sentinel filter is real user input.
 
 ## Sentinel
 
@@ -135,7 +145,7 @@ reply to drive. commands: pause resume status end "switch to <task>" faster slow
 
 The `thread_ts` field in `session.json` for iMessage stores the `rowid` of this header message (from the send round-trip — see below). It's not a "thread" in Apple's sense, but it anchors the session to a specific starting point for reads and for idempotence checks.
 
-All reads use `last_seen_ts` as the cursor — because iMessage is single-session, every non-`is_from_me` message in this conversation since the cursor is a reply to this session. No tag-filtering needed.
+All reads use `last_seen_ts` as the cursor — because iMessage is single-session, every non-sentinel message in this conversation since the cursor is a reply to this session. No tag-filtering needed.
 
 ### Getting the header's rowid
 
@@ -143,7 +153,7 @@ All reads use `last_seen_ts` as the cursor — because iMessage is single-sessio
 
 1. Send the header.
 2. Immediately read with `since_ns = 0` limited to the last 1 message, OR re-read with a `since_ns` of (current time in ns) minus 10 seconds.
-3. Take the most recent `is_from_me=1` row whose text matches your header's first 40 chars.
+3. Take the most recent row whose text starts with the sentinel and matches your header's first 40 chars. (Match on the sentinel, not `is_from_me` — same reasoning as the reply filter.)
 
 Store that rowid as `thread_ts` in state.
 
@@ -176,7 +186,7 @@ After the first post of a new session, fetch it back once to confirm it rendered
 ### sqlite3 / chat.db
 - Reading chat.db requires **Full Disk Access** for whatever process runs `sqlite3`. Without it: `Error: unable to open database file`. Fix: System Settings → Privacy & Security → Full Disk Access → [your terminal]. Surface and exit if this fails.
 - chat.db is written-to live by Messages.app. The read script uses a read-only connection (`file:…?mode=ro`) to avoid lock contention. Transient `database is locked` is possible under heavy write; retry once after 500ms before giving up.
-- Newer macOS versions may store message bodies in `attributedBody` (binary NSAttributedString typedstream) instead of `text`. The Python read script (`imessage_read.py`, also exposed as `imessage_read.sh`) decodes the NSString payload from `attributedBody` when `text` is NULL — both regular replies and most rich replies round-trip. Tapbacks, reactions, and some stickers (which embed via NSDictionary attributes rather than a length-prefixed NSString backing) are still invisible; tell users to reply with plain text or short emoji.
+- **attributedBody is the default source on current macOS.** On Sonoma / Sequoia / Tahoe the plain `message.text` column is frequently NULL and the body lives ONLY in `message.attributedBody` (a binary NSAttributedString typedstream). The Python read script (`imessage_read.py`, also exposed as `imessage_read.sh`) decodes the length-prefixed NSString payload from `attributedBody` whenever `text` is NULL/empty, for both inbound and outbound rows. Emoji and embedded newlines round-trip correctly because the decoder slices an exact, length-prefixed byte range (not a regex). Verify with `scripts/imessage_selftest.py`. Tapbacks, reactions, and some stickers (which embed via NSNumber/NSDictionary attributes rather than a length-prefixed NSString backing) have no string body and are intentionally omitted; tell users to reply with plain text or short emoji.
 
 ### Graceful degradation
 
@@ -208,18 +218,21 @@ On session start, BEFORE posting the header, run these two checks and surface an
    ```
    Exit 0 with output = Automation is granted. Non-zero (especially `-1743` "Not authorized") = print the Automation fix instructions and exit.
 
-3. **Same-Apple-ID detection** (after sending the header so there's at least one row to inspect): read the last 20 messages from this conversation, count `is_from_me` values. If every row is `is_from_me = 1`, both ends share an Apple ID — write `"same_apple_id": true` (or a notes string) to `session.json` so subsequent ticks skip the `is_from_me` secondary filter. See "Sender distinguishability" above for why this matters.
+3. **Reader round-trip** (optional but recommended, especially on a new machine): run `scripts/imessage_selftest.py <handle>[,<alias>...]`. It proves the attributedBody decoder round-trips plain text, emoji, newlines, and long bodies, and (if chat.db is readable) that real replies recover from `attributedBody`. If it fails, fix before entering AFK.
 
-The first two are one-shot; cache the success for the session's lifetime. The third should re-check on resume since the user could have signed out/in between sessions.
+There is deliberately no "same Apple ID" detection step and no `is_from_me` flag to maintain: the sentinel is the sole filter in every topology (see "Sender distinguishability").
+
+Both checks are one-shot; cache success for the session's lifetime.
 
 ## Testing (one-time per machine)
 
 Before trusting iMessage with a real AFK session, dry-run:
 
-1. Put handle + service into `~/.claude/afk/imessage.json`.
-2. Run the send script with a tiny body. Confirm it lands on your phone.
-3. Reply from your phone.
-4. Run the read script with `since_ns=0`. Confirm both messages round-trip, with correct `is_from_me` values.
-5. Send a message containing a newline and an emoji. Confirm they render as expected.
+1. Put handle + service + `aliases` into `~/.claude/afk/imessage.json`. List every address you might reply from.
+2. Run `scripts/imessage_selftest.py <handle>[,<alias>...]`. Confirm the synthetic decoder tests PASS and, if chat.db is readable, that real bodies recover from `attributedBody`.
+3. Run the send script with a tiny body. Confirm it lands on your phone.
+4. Reply from your phone — once with plain text, once with an emoji, once with a newline in the body. If you have multiple aliases, reply from more than one.
+5. Run the read script with all aliases comma-joined and `since_ns=0`. Confirm every reply round-trips with its exact text. (Note: replies may show `is_from_me=1` on a shared Apple ID — that is expected and must not cause them to be dropped.)
+6. Send a message containing a newline and an emoji. Confirm they render as expected.
 
 If any of those fail, fix before using `/loop /afk`.
